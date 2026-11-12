@@ -826,6 +826,8 @@ function watchPlay(el, label) {
 
 function afterTrackChange() {
   audio.loop = state.repeat === 'one';
+  updatePositionState(); // a preloaded song already knows its length; otherwise this clears the old one
+  renderProgress();
   renderNowPlaying();
   renderTracks();
   updateMediaSession(trackById(state.current));
@@ -906,6 +908,7 @@ function step(dir, auto = false) {
 // Normal path: start the next song a moment before this one ends.
 function onTimeUpdate() {
   renderProgress();
+  if (Date.now() - lastPositionReport > 10000) updatePositionState(); // correct any drift
   recordWhilePlaying();
   const left = audio.duration - audio.currentTime;
   if (!audio.paused && left < HANDOFF_SECONDS && canHandoff()) handoff(true);
@@ -988,10 +991,23 @@ async function updateMediaSession(t) {
   navigator.mediaSession.metadata = new MediaMetadata({ title: t.title, artist: t.artist || '', album: 'BerryGoodTunes', artwork });
 }
 
+// Tells iOS where playback is, for the lock screen, Control Center and car displays. iOS keeps
+// counting from the last report on its own, so this must be re-sent whenever the song changes,
+// or it carries on with the previous song's clock.
+let lastPositionReport = 0;
 function updatePositionState() {
-  if (!navigator.mediaSession?.setPositionState || !Number.isFinite(audio.duration)) return;
+  if (!navigator.mediaSession?.setPositionState) return;
+  lastPositionReport = Date.now();
   try {
-    navigator.mediaSession.setPositionState({ duration: audio.duration, position: Math.min(audio.currentTime, audio.duration), playbackRate: audio.playbackRate });
+    if (!Number.isFinite(audio.duration) || !audio.duration) {
+      navigator.mediaSession.setPositionState(); // length not known yet: clear the old song's clock
+      return;
+    }
+    navigator.mediaSession.setPositionState({
+      duration: audio.duration,
+      position: Math.min(audio.currentTime, audio.duration),
+      playbackRate: audio.playbackRate || 1,
+    });
   } catch { /* ignore invalid states mid-load */ }
 }
 
@@ -1013,7 +1029,9 @@ if ('mediaSession' in navigator) {
 const onActive = (fn) => (e) => { if (e.target === audio && e.target.src !== SILENT) fn(e); };
 for (const el of players) {
   el.addEventListener('play', onActive(renderPlayState));
-  el.addEventListener('pause', onActive(() => { renderPlayState(); recordProgress(state.current, audio, true); }));
+  el.addEventListener('playing', onActive(updatePositionState));
+  el.addEventListener('durationchange', onActive(updatePositionState));
+  el.addEventListener('pause', onActive(() => { renderPlayState(); updatePositionState(); recordProgress(state.current, audio, true); }));
   el.addEventListener('timeupdate', onActive(onTimeUpdate));
   el.addEventListener('loadedmetadata', onActive(() => { renderProgress(); updatePositionState(); }));
   el.addEventListener('seeked', onActive(() => { updatePositionState(); recordProgress(state.current, audio, true); }));
