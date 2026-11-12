@@ -41,6 +41,10 @@
 
     <nav id="views" class="views" aria-label="Playlists"></nav>
 
+    <div id="fresh-actions" class="fresh-actions" hidden>
+      <button id="fresh-now" type="button">Fetch a new mix now</button>
+    </div>
+
     <div id="list-actions" class="list-actions" hidden>
       <button id="play-all" type="button">Play</button>
       <button id="shuffle-all" type="button">Shuffle</button>
@@ -88,6 +92,7 @@
     <button id="sheet-add-pl" type="button">Add to playlist…</button>
     <button id="sheet-remove-pl" type="button" hidden>Remove from playlist</button>
     <button id="sheet-played" type="button" hidden>Mark as played</button>
+    <button id="sheet-keep" type="button" hidden>Keep in my library</button>
     <button id="sheet-move" type="button">Move to Podcasts</button>
     <button id="sheet-save" type="button">Save to this device</button>
     <button id="sheet-source" type="button">Open original link</button>
@@ -117,6 +122,7 @@
       <input id="autosave" type="checkbox">
     </label>
     <div class="row"><span>Storage used on this device</span><span id="storage"></span></div>
+    <div class="row"><span>Notifications on this device<small id="push-note"></small></span><button id="push-toggle" type="button" class="text-btn">Turn on</button></div>
     <div class="row"><span>Downloader (yt-dlp)</span><span id="ytdlp">–</span></div>
     <div id="jsruntime-row" class="row"><span>YouTube helper (Deno)<small>If missing, many YouTube downloads fail with 403. Re-run setup.cmd.</small></span><span id="jsruntime">–</span></div>
     <button id="save-all" type="button">Save all songs to this device now</button>

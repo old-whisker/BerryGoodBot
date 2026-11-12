@@ -98,6 +98,23 @@ class Library:
                 (self.root / name).unlink(missing_ok=True)
         return True
 
+    # ---- Fresh mix -----------------------------------------------------------
+
+    def fresh_tracks(self) -> list[dict]:
+        """Songs from a Fresh mix that haven't been kept yet."""
+        with self._lock:
+            return [t for t in self._tracks.values() if t.get("fresh")]
+
+    def keep(self, track_id: str) -> dict | None:
+        """Move a Fresh song into the library for good."""
+        with self._lock:
+            track = self._tracks.get(track_id)
+            if not track:
+                return None
+            if track.pop("fresh", None):
+                self._save()
+            return track
+
     # ---- listening progress -----------------------------------------------
 
     def merge_progress(self, entries: dict[str, dict]) -> dict[str, dict]:
@@ -174,6 +191,7 @@ class Library:
             if track_id not in pl["track_ids"]:
                 pl["track_ids"].append(track_id)
                 self._save_playlists()
+            self.keep(track_id)  # putting a Fresh song in a playlist means you want it
             return self._public_playlist(pl)
 
     def remove_from_playlist(self, playlist_id: str, track_id: str) -> dict | None:

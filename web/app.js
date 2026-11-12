@@ -121,6 +121,7 @@ const state = {
   playlists: prefs.get('playlists', []), // cached so they still show with the PC off
   view: prefs.get('view', 'all'),        // 'all' or a playlist id
   section: prefs.get('section', 'music'), // music | podcasts
+  fresh: null,                            // the PC's Fresh mix status
   shuffle: prefs.get('shuffle', false),
   repeat: prefs.get('repeat', 'off'), // off | all | one
   autosave: prefs.get('autosave', true),
@@ -139,10 +140,13 @@ const SECTION_NAMES = { music: 'Music', podcasts: 'Podcasts' };
 const sectionOf = (item) => item?.section || 'music';
 
 // Songs in the section being viewed (Music or Podcasts), newest first.
-function allTracks() {
+// Songs in the section being viewed (Music or Podcasts), newest first. Songs from a Fresh mix
+// show only in the Fresh tab until you keep them.
+function allTracks({ fresh = false } = {}) {
   const merged = new Map(state.local);
   for (const [id, t] of state.server) merged.set(id, t);
-  return [...merged.values()].filter((t) => sectionOf(t) === state.section).sort((a, b) => b.added_at - a.added_at);
+  return [...merged.values()].filter((t) => sectionOf(t) === state.section && !!t.fresh === fresh)
+    .sort((a, b) => b.added_at - a.added_at);
 }
 
 const sectionPlaylists = () => state.playlists.filter((pl) => sectionOf(pl) === state.section);
@@ -151,7 +155,8 @@ const currentPlaylist = () => sectionPlaylists().find((pl) => pl.id === state.vi
 function visibleTracks() {
   const q = state.filter.trim().toLowerCase();
   const pl = currentPlaylist();
-  const list = pl ? pl.track_ids.map(trackById).filter(Boolean) : allTracks();
+  const list = pl ? pl.track_ids.map(trackById).filter(Boolean)
+    : state.view === 'fresh' && state.section === 'music' ? allTracks({ fresh: true }) : allTracks();
   return q ? list.filter((t) => `${t.title} ${t.artist}`.toLowerCase().includes(q)) : list;
 }
 
@@ -213,13 +218,44 @@ async function refreshTracks() {
   state.server = new Map(tracks.map((t) => [t.id, t]));
   for (const t of tracks) {
     const saved = state.local.get(t.id);
-    if (saved && sectionOf(saved) !== sectionOf(t)) {
-      const meta = { ...saved, section: t.section };
+    if (saved && (sectionOf(saved) !== sectionOf(t) || !!saved.fresh !== !!t.fresh)) {
+      const meta = { ...saved, section: t.section, fresh: t.fresh };
       state.local.set(t.id, meta);
       db.put('tracks', meta).catch(() => {});
     }
   }
+  // Un-kept songs from an old Fresh mix were cleared on the PC; drop this device's copies too.
+  for (const [id, t] of [...state.local]) {
+    if (t.fresh && !state.server.has(id)) await removeLocal(id);
+  }
+  renderViews(); // tab counts (e.g. ✨ Fresh) change as songs arrive
   renderTracks();
+}
+
+async function refreshFresh() {
+  try {
+    state.fresh = await (await api('/fresh')).json();
+  } catch { /* PC offline */ }
+  renderJobs();
+}
+
+async function startFresh() {
+  if (!state.online) { toast('Your PC needs to be on to fetch a Fresh mix.'); return; }
+  try {
+    await api('/fresh/start', { method: 'POST' });
+    if (state.fresh) state.fresh.pending = false;
+    toast('Fetching today’s Fresh mix…');
+    pollJobs();
+  } catch (e) {
+    toast(e instanceof ApiError ? e.message : 'Couldn’t reach your PC.');
+  }
+  renderJobs();
+}
+
+async function skipFresh() {
+  try { await api('/fresh/skip', { method: 'POST' }); } catch { /* offline */ }
+  if (state.fresh) state.fresh.pending = false;
+  renderJobs();
 }
 
 async function refreshPlaylists() {
@@ -229,7 +265,7 @@ async function refreshPlaylists() {
 function setPlaylists(list) {
   state.playlists = list;
   prefs.set('playlists', list);
-  if (state.view !== 'all' && !currentPlaylist()) setView('all');
+  if (state.view !== 'all' && state.view !== 'fresh' && !currentPlaylist()) setView('all');
   renderViews();
   renderTracks();
 }
@@ -295,6 +331,12 @@ function renderJobs() {
   const showDone = (j) => j.finished_at >= now - (j.kind === 'playlist' ? 20 : 8);
   const items = state.pendingAdds.map(({ url }) => `
     <li class="job"><div class="label"><strong>${esc(url)}</strong><small>Waiting for your PC to come online</small></div></li>`);
+  if (state.online && state.fresh?.pending) {
+    items.unshift(`<li class="job offer"><div class="label"><strong>🍓 Today’s Fresh mix is ready</strong>
+      <small>About ${state.fresh.size} new songs related to your music</small></div>
+      <button type="button" class="text-btn" data-fresh-start>Start</button>
+      <button type="button" class="text-btn muted" data-fresh-skip>Not today</button></li>`);
+  }
   const dismiss = (j) => `<button type="button" data-dismiss="${j.id}" aria-label="Dismiss">${ICONS.close}</button>`;
   const row = (j, label, extra = '') => `<li class="job${j.status === 'error' ? ' error' : ''}">
     <div class="label"><strong>${esc(j.title || j.url)}</strong><small>${esc(label)}</small></div>${extra}</li>`;
@@ -303,7 +345,7 @@ function renderJobs() {
   const jobs = state.jobs.filter((j) => !state.dismissed.has(j.id)).reverse();
   for (const j of jobs) {
     if (j.status === 'downloading' || j.status === 'processing') {
-      const label = j.kind === 'playlist' ? 'Reading playlist…'
+      const label = j.kind === 'fresh' ? 'Picking new songs…' : j.kind === 'playlist' ? 'Reading playlist…'
         : j.status === 'processing' ? 'Converting…' : `Downloading… ${Math.round(j.progress * 100)}%`;
       items.push(row(j, label, `<span class="bar" style="width:${Math.round(j.progress * 100)}%"></span>`));
     }
@@ -331,8 +373,9 @@ function renderJobs() {
       const retry = j.kind === 'video' ? `<button type="button" class="text-btn" data-retry="${j.id}">Retry</button>` : '';
       items.push(row(j, j.error, retry + dismiss(j)));
     } else if (j.status === 'done' && showDone(j)) {
-      const where = SECTION_NAMES[sectionOf(j)];
+      const where = j.fresh && !j.duplicate ? '✨ Fresh' : SECTION_NAMES[sectionOf(j)];
       let label = j.duplicate ? `Already in ${where}` : `Added to ${where}`;
+      if (j.kind === 'fresh') label = `${j.fresh_count} new songs on the way. They’ll appear in ✨ Fresh.`;
       if (j.playlist) {
         const { added, already } = j.playlist;
         label = `Playlist: ${added} song${added === 1 ? '' : 's'} queued` + (already ? ` · ${already} already in your library` : '');
@@ -489,7 +532,9 @@ function renderViews() {
   const count = (pl) => pl.track_ids.filter((id) => trackById(id)).length;
   const chip = (view, label, extra = '') =>
     `<button type="button" class="chip${state.view === view ? ' on' : ''}" data-view="${view}">${label}${extra}</button>`;
+  const freshCount = state.section === 'music' ? allTracks({ fresh: true }).length : 0;
   $('views').innerHTML = chip('all', `All ${SECTION_NAMES[state.section].toLowerCase()}`)
+    + (state.section === 'music' ? chip('fresh', '✨ Fresh', freshCount ? ` <small>${freshCount}</small>` : '') : '')
     + sectionPlaylists().map((pl) => chip(pl.id, esc(pl.name), state.view === pl.id
       ? ` <span class="chip-more" aria-label="Playlist options">${ICONS.more}</span>` : ` <small>${count(pl)}</small>`)).join('')
     + `<button type="button" class="chip new" data-new-playlist>+ New</button>`;
@@ -526,7 +571,7 @@ $('views').addEventListener('click', async (e) => {
   }
   const btn = e.target.closest('[data-view]');
   if (!btn) return;
-  if (btn.dataset.view === state.view && state.view !== 'all') { openPlaylistSheet(); return; }
+  if (btn.dataset.view === state.view && !['all', 'fresh'].includes(state.view)) { openPlaylistSheet(); return; }
   setView(btn.dataset.view);
   renderViews();
   renderTracks();
@@ -600,7 +645,10 @@ function renderTracks() {
   const list = visibleTracks();
   const pl = currentPlaylist();
   $('empty').hidden = pl ? list.length > 0 : allTracks().length > 0;
-  $('empty').textContent = pl ? `This playlist is empty. Use ${state.section === 'music' ? 'a song’s' : 'an episode’s'} ⋯ menu to add it here.`
+  $('fresh-actions').hidden = !(state.view === 'fresh' && state.section === 'music');
+  $('empty').textContent = state.view === 'fresh' && state.section === 'music'
+    ? 'No Fresh mix right now. Each evening your PC offers about 20 new songs related to your music. Or fetch some now.'
+    : pl ? `This playlist is empty. Use ${state.section === 'music' ? 'a song’s' : 'an episode’s'} ⋯ menu to add it here.`
     : state.section === 'music' ? 'No music yet. Paste a link above to add some.'
     : 'No podcasts yet. Paste a link above while on this tab, or move something here from Music with its ⋯ menu.';
   $('list-actions').hidden = list.length === 0;
@@ -634,6 +682,8 @@ $('tracks').addEventListener('click', (e) => {
 
 $('jobs').addEventListener('click', (e) => {
   if (e.target.closest('[data-cancel-queued]')) { cancelQueued(); return; }
+  if (e.target.closest('[data-fresh-start]')) { startFresh(); return; }
+  if (e.target.closest('[data-fresh-skip]')) { skipFresh(); return; }
   const retry = e.target.closest('[data-retry]');
   if (retry) { retryJobs([retry.dataset.retry]); return; }
   const failedIds = () => state.jobs.filter((j) => j.status === 'error' && !state.dismissed.has(j.id)).map((j) => j.id);
@@ -1140,7 +1190,8 @@ function openTrackSheet(id) {
   const pl = currentPlaylist();
   $('sheet-remove-pl').hidden = !pl;
   if (pl) $('sheet-remove-pl').textContent = `Remove from “${pl.name}”`;
-  $('sheet-move').hidden = !state.server.has(id);
+  $('sheet-move').hidden = !state.server.has(id) || !!t.fresh;
+  $('sheet-keep').hidden = !t.fresh || !state.server.has(id);
   $('sheet-played').hidden = !isResumable(t);
   $('sheet-played').textContent = progress[id]?.played || progress[id]?.pos > 10 ? 'Mark as unplayed' : 'Mark as played';
   $('sheet-move').textContent = `Move to ${SECTION_NAMES[otherSection(sectionOf(t))]}`;
@@ -1155,6 +1206,22 @@ $('sheet-source').addEventListener('click', () => {
 });
 $('sheet-delete').addEventListener('click', () => { closeSheets(); deleteTrack(sheetTrack); });
 $('sheet-add-pl').addEventListener('click', () => { closeSheets(); openPickSheet(sheetTrack); });
+$('sheet-keep').addEventListener('click', async () => {
+  closeSheets();
+  try {
+    await api(`/tracks/${sheetTrack}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ keep: true }) });
+    await refreshTracks();
+    renderViews();
+    toast('Kept. It’s in All music now.');
+  } catch {
+    toast('Couldn’t reach your PC.');
+  }
+});
+$('fresh-now').addEventListener('click', () => {
+  const n = allTracks({ fresh: true }).length;
+  if (n && !confirm(`Fetch a new mix? The ${n} Fresh songs you haven’t kept will be replaced.`)) return;
+  startFresh();
+});
 $('sheet-played').addEventListener('click', () => {
   closeSheets();
   const p = progress[sheetTrack];
@@ -1190,6 +1257,7 @@ $('sheet-remove-pl').addEventListener('click', async () => {
 async function openSettings() {
   $('autosave').checked = state.autosave;
   $('ytdlp').textContent = state.ytdlp || '–';
+  renderPushRow();
   $('jsruntime').textContent = !state.online ? '–' : state.jsRuntime ? `${state.jsRuntime} ✓` : 'Missing!';
   $('jsruntime-row').classList.toggle('warn', state.online && !state.jsRuntime);
   $('storage').textContent = '…';
@@ -1227,6 +1295,76 @@ $('status').addEventListener('click', () => {
   sync();
 });
 
+/* ---------- notifications (evening Fresh mix prompt) ---------- */
+
+const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+
+async function currentPushSubscription() {
+  if (!pushSupported()) return null;
+  const reg = await navigator.serviceWorker.ready;
+  return reg.pushManager.getSubscription();
+}
+
+async function renderPushRow() {
+  const time = state.fresh?.notify_at ? to12h(state.fresh.notify_at) : '5:30 PM';
+  $('push-note').textContent = `A Fresh mix prompt around ${time} when your PC is on.`;
+  const btn = $('push-toggle');
+  if (!pushSupported()) {
+    btn.hidden = true;
+    $('push-note').textContent = 'Needs the Home Screen app on iOS 16.4 or newer.';
+    return;
+  }
+  const sub = await currentPushSubscription().catch(() => null);
+  btn.hidden = false;
+  btn.textContent = sub ? 'Send test' : Notification.permission === 'denied' ? 'Blocked' : 'Turn on';
+  btn.disabled = !sub && Notification.permission === 'denied';
+  if (btn.disabled) $('push-note').textContent = 'Turned off for this app in iPhone Settings → Notifications.';
+}
+
+const to12h = (hhmm) => {
+  const [h, m] = hhmm.split(':').map(Number);
+  return `${((h + 11) % 12) + 1}:${String(m).padStart(2, '0')} ${h < 12 ? 'AM' : 'PM'}`;
+};
+
+function base64UrlToBytes(b64) {
+  const s = atob(b64.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - (b64.length % 4)) % 4));
+  return Uint8Array.from(s, (c) => c.charCodeAt(0));
+}
+
+async function sendSubscription(sub) {
+  await api('/push/subscribe', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(sub.toJSON()) });
+}
+
+$('push-toggle').addEventListener('click', async () => {
+  if (!state.online) { toast('Your PC needs to be on to set up notifications.'); return; }
+  try {
+    const existing = await currentPushSubscription();
+    if (existing) {
+      await sendSubscription(existing);
+      const { sent } = await (await api('/push/test', { method: 'POST' })).json();
+      toast(sent ? 'Test sent. It should arrive in a few seconds.' : 'Couldn’t send. Check the server log.');
+      return;
+    }
+    if (await Notification.requestPermission() !== 'granted') { renderPushRow(); return; } // asked from the tap, as iOS requires
+    const { key } = await (await api('/push/key')).json();
+    const reg = await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: base64UrlToBytes(key) });
+    await sendSubscription(sub);
+    toast('Notifications are on.');
+  } catch (e) {
+    toast(`Couldn’t turn on notifications (${e.name || 'error'}).`);
+  }
+  renderPushRow();
+});
+
+// Links that open the app with an action, from a notification tap: /?fresh=start
+function handleLaunchParams(params) {
+  if (params.get('fresh') === 'start') startFresh();
+}
+navigator.serviceWorker?.addEventListener('message', (e) => {
+  if (e.data?.type === 'open-url') handleLaunchParams(new URL(e.data.url).searchParams);
+});
+
 /* ---------- sync loop ---------- */
 
 let syncing = false;
@@ -1239,6 +1377,9 @@ async function sync() {
     await refreshTracks();
     await refreshPlaylists();
     await pushProgress();
+    await refreshFresh();
+    // Re-send this device's notification subscription in case the PC's copy was lost.
+    if (!sync.pushSent) { const sub = await currentPushSubscription().catch(() => null); if (sub) await sendSubscription(sub); sync.pushSent = true; }
     await pollJobs();
     if (state.autosave) saveMissing();
   } catch {
@@ -1287,6 +1428,10 @@ async function boot() {
     history.replaceState(null, '', location.pathname);
     await sync();
     await addUrl(shared);
+  } else if (params.has('fresh')) { // opened by tapping the evening notification
+    history.replaceState(null, '', location.pathname);
+    await sync();
+    handleLaunchParams(params);
   } else {
     sync();
   }

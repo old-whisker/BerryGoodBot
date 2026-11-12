@@ -1,5 +1,5 @@
 // App shell cache: opens instantly (and with the PC off), refreshes in the background.
-const CACHE = 'berrytunes-v8';
+const CACHE = 'berrytunes-v9';
 const SHELL = ['./', 'index.html', 'app.js', 'styles.css', 'manifest.webmanifest', 'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', (e) => {
@@ -30,4 +30,31 @@ self.addEventListener('fetch', (e) => {
     }
     return fresh;
   }));
+});
+
+// Notifications from the PC (e.g. "Today's Fresh mix is ready"). Shown even when the app is closed.
+self.addEventListener('push', (e) => {
+  let msg = {};
+  try { msg = e.data ? e.data.json() : {}; } catch { msg = { body: e.data?.text() }; }
+  e.waitUntil(self.registration.showNotification(msg.title || 'BerryGoodTunes', {
+    body: msg.body || '',
+    tag: msg.tag || 'berrygoodtunes',
+    icon: 'icons/icon-192.png',
+    data: { url: msg.url || './' },
+  }));
+});
+
+// Tapping it opens the app (or brings it forward) and hands over the action, e.g. ?fresh=start.
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close();
+  const url = new URL(e.notification.data?.url || './', self.registration.scope).href;
+  e.waitUntil((async () => {
+    const open = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    if (open.length) {
+      await open[0].focus();
+      open[0].postMessage({ type: 'open-url', url });
+      return;
+    }
+    await self.clients.openWindow(url);
+  })());
 });
