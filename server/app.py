@@ -15,7 +15,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from downloader import SECTIONS, Downloader, default_ffmpeg, js_runtime
+from fresh import Fresh
 from library import Library
+from push import Push
 
 HERE = Path(__file__).resolve().parent
 LIBRARY_DIR = Path(os.environ.get("BERRY_LIBRARY", HERE / "library"))
@@ -24,6 +26,8 @@ WEB_DIR = HERE.parent / "web"
 
 library = Library(LIBRARY_DIR)
 downloader = Downloader(library, cookies=COOKIES, ffmpeg=default_ffmpeg())
+push = Push(LIBRARY_DIR)
+fresh = Fresh(library, downloader, push, LIBRARY_DIR, cookies=COOKIES)
 
 app = FastAPI(title="BerryGoodTunes")
 
@@ -43,7 +47,14 @@ class PlaylistRequest(BaseModel):
 
 
 class TrackUpdate(BaseModel):
-    section: str
+    section: str | None = None
+    keep: bool = False  # move a Fresh song into the library for good
+
+
+class PushSubscription(BaseModel):
+    endpoint: str
+    keys: dict[str, str]
+    expirationTime: float | None = None
 
 
 def _section(section: str | None) -> str | None:
@@ -70,7 +81,8 @@ def public(track: dict) -> dict:
     return {
         k: track.get(k)
         for k in ("id", "title", "artist", "duration", "source_url", "size", "added_at")
-    } | {"has_cover": bool(track.get("cover_file")), "section": track.get("section", "music")}
+    } | {"has_cover": bool(track.get("cover_file")), "section": track.get("section", "music"),
+         "fresh": bool(track.get("fresh"))}
 
 
 @app.get("/api/health")
@@ -100,7 +112,12 @@ def track_cover(track_id: str):
 
 @app.patch("/api/tracks/{track_id}")
 def update_track(track_id: str, req: TrackUpdate):
-    return public(library.set_section(track_id, _section(req.section)) or _404())
+    track = library.get(track_id) or _404()
+    if req.section:
+        track = library.set_section(track_id, _section(req.section))
+    if req.keep:
+        track = library.keep(track_id)
+    return public(track)
 
 
 @app.delete("/api/tracks/{track_id}")
@@ -138,6 +155,40 @@ def cancel_queued():
 def sync_progress(req: ProgressSync):
     """Devices send their listening positions and get back everyone's (newest wins)."""
     return library.merge_progress({k: v.model_dump() for k, v in req.entries.items()})
+
+
+@app.get("/api/fresh")
+def fresh_status():
+    return fresh.status()
+
+
+@app.post("/api/fresh/start")
+def fresh_start():
+    if not fresh.status()["can_build"]:
+        raise HTTPException(400, "Add some music from YouTube first; the Fresh mix branches out from it.")
+    return {"started": fresh.start()}
+
+
+@app.post("/api/fresh/skip")
+def fresh_skip():
+    fresh.skip()
+    return {"ok": True}
+
+
+@app.get("/api/push/key")
+def push_key():
+    return {"key": push.public_key()}
+
+
+@app.post("/api/push/subscribe")
+def push_subscribe(sub: PushSubscription):
+    push.subscribe(sub.model_dump(exclude_none=True))
+    return {"devices": push.device_count}
+
+
+@app.post("/api/push/test")
+def push_test():
+    return {"sent": push.send("🍓 BerryGoodTunes", "Notifications are working.", tag="test")}
 
 
 @app.get("/api/playlists")

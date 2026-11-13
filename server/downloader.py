@@ -66,7 +66,7 @@ class Downloader:
 
     # ---- public API -------------------------------------------------------
 
-    def submit(self, url: str, title: str | None = None, section: str | None = None) -> dict:
+    def submit(self, url: str, title: str | None = None, section: str | None = None, fresh: bool = False) -> dict:
         job = {
             "id": uuid.uuid4().hex[:12],
             "url": url,
@@ -82,6 +82,7 @@ class Downloader:
             "playlist": None,  # {"added": n, "already": n} for playlist jobs
             "attempt": 1,
             "section": section,  # music | podcasts; None means sort it automatically
+            "fresh": fresh,  # part of a Fresh mix: lands in the Fresh tab until kept
         }
         with self._lock:
             self.jobs[job["id"]] = job
@@ -109,6 +110,21 @@ class Downloader:
             for job_id in queued:
                 del self.jobs[job_id]
         return len(queued)
+
+    def add_task(self, kind: str, title: str) -> str:
+        """A job-list row for work done outside the download queue (e.g. building a Fresh mix)."""
+        job_id = uuid.uuid4().hex[:12]
+        with self._lock:
+            self.jobs[job_id] = {
+                "id": job_id, "url": "", "kind": kind, "status": "processing", "progress": 0.0, "title": title,
+                "track_id": None, "error": None, "duplicate": False, "created_at": time.time(),
+                "finished_at": None, "playlist": None, "attempt": 1, "section": "music", "fresh": False,
+            }
+        return job_id
+
+    def finish_task(self, job_id: str, error: str | None = None, **fields):
+        self._update(job_id, status="error" if error else "done", error=error, progress=1.0,
+                     finished_at=time.time(), **fields)
 
     def list_jobs(self) -> list[dict]:
         with self._lock:
@@ -233,6 +249,8 @@ class Downloader:
                 "source_id": f"{info.get('extractor_key')}:{info.get('id')}",
                 "section": self.jobs.get(job_id, {}).get("section") or guess_section(info),
             }
+            if self.jobs.get(job_id, {}).get("fresh"):
+                meta["fresh"] = True
             track = self.library.add(track_id, audio, covers[0] if covers else None, meta)
             return {"track_id": track["id"], "title": track["title"], "downloaded": True, "section": track["section"]}
         finally:

@@ -7,7 +7,9 @@ $python = Join-Path $server '.venv\Scripts\python.exe'
 if (-not (Test-Path $python)) { throw 'Run windows\setup.cmd first.' }
 Set-Location $server
 
-# YouTube changes often; a fresh yt-dlp on every start avoids most "it stopped working" moments.
+# Install anything new from an update (instant when nothing changed), then keep yt-dlp fresh:
+# YouTube changes often, and a current yt-dlp avoids most "it stopped working" moments.
+& $python -m pip install --quiet -r requirements.txt *> $null
 & $python -m pip install --quiet --upgrade "yt-dlp[default]" *> $null
 
 $run = { & $python -m uvicorn app:app --host 127.0.0.1 --port 8765 }
