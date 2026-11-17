@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from downloader import SECTIONS, Downloader, default_ffmpeg, js_runtime
 from fresh import Fresh
 from library import Library
+from podcasts import PodcastError, Podcasts
 from push import Push
 
 HERE = Path(__file__).resolve().parent
@@ -28,6 +29,10 @@ library = Library(LIBRARY_DIR)
 downloader = Downloader(library, cookies=COOKIES, ffmpeg=default_ffmpeg())
 push = Push(LIBRARY_DIR)
 fresh = Fresh(library, downloader, push, LIBRARY_DIR, cookies=COOKIES)
+podcasts = Podcasts(library, downloader, push, LIBRARY_DIR)
+
+AUDIO_TYPES = {".m4a": "audio/mp4", ".mp3": "audio/mpeg", ".aac": "audio/aac"}
+IMAGE_TYPES = {".jpg": "image/jpeg", ".png": "image/png"}
 
 app = FastAPI(title="BerryGoodTunes")
 
@@ -49,6 +54,14 @@ class PlaylistRequest(BaseModel):
 class TrackUpdate(BaseModel):
     section: str | None = None
     keep: bool = False  # move a Fresh song into the library for good
+
+
+class PodcastRequest(BaseModel):
+    link: str  # a feed URL or an Apple Podcasts page link
+
+
+class EpisodeRequest(BaseModel):
+    guid: str
 
 
 class PushSubscription(BaseModel):
@@ -82,7 +95,8 @@ def public(track: dict) -> dict:
         k: track.get(k)
         for k in ("id", "title", "artist", "duration", "source_url", "size", "added_at")
     } | {"has_cover": bool(track.get("cover_file")), "section": track.get("section", "music"),
-         "fresh": bool(track.get("fresh"))}
+         "fresh": bool(track.get("fresh")), "podcast_id": track.get("podcast_id"),
+         "published_at": track.get("published_at")}
 
 
 @app.get("/api/health")
@@ -98,7 +112,8 @@ def list_tracks():
 @app.get("/api/tracks/{track_id}/audio")
 def track_audio(track_id: str):
     track = library.get(track_id) or _404()
-    return FileResponse(library.audio_path(track), media_type="audio/mp4")
+    path = library.audio_path(track)
+    return FileResponse(path, media_type=AUDIO_TYPES.get(path.suffix.lower(), "audio/mp4"))
 
 
 @app.get("/api/tracks/{track_id}/cover")
@@ -107,7 +122,7 @@ def track_cover(track_id: str):
     cover = library.cover_path(track)
     if not cover or not cover.exists():
         _404()
-    return FileResponse(cover, media_type="image/jpeg")
+    return FileResponse(cover, media_type=IMAGE_TYPES.get(cover.suffix.lower(), "image/jpeg"))
 
 
 @app.patch("/api/tracks/{track_id}")
@@ -173,6 +188,63 @@ def fresh_start():
 def fresh_skip():
     fresh.skip()
     return {"ok": True}
+
+
+@app.get("/api/podcasts")
+def list_podcasts():
+    return podcasts.list()
+
+
+@app.get("/api/podcasts/search")
+def search_podcasts(q: str):
+    try:
+        return podcasts.search(q.strip()[:100])
+    except Exception:
+        raise HTTPException(502, "Couldn't reach the podcast directory. Try again in a moment.")
+
+
+@app.post("/api/podcasts", status_code=201)
+def subscribe_podcast(req: PodcastRequest):
+    if not re.match(r"https?://", req.link.strip()):
+        raise HTTPException(400, "Paste the show's feed link or its Apple Podcasts link.")
+    try:
+        return podcasts.subscribe(req.link)
+    except PodcastError as e:
+        raise HTTPException(400, str(e))
+    except Exception:
+        raise HTTPException(502, "Couldn't load that podcast. Check the link and try again.")
+
+
+@app.delete("/api/podcasts/{show_id}")
+def unsubscribe_podcast(show_id: str):
+    podcasts.unsubscribe(show_id)
+    return {"ok": True}
+
+
+@app.get("/api/podcasts/{show_id}/image")
+def podcast_image(show_id: str):
+    path = podcasts.image_path(show_id)
+    if not path or not path.exists():
+        _404()
+    return FileResponse(path, media_type=IMAGE_TYPES.get(path.suffix.lower(), "image/jpeg"))
+
+
+@app.get("/api/podcasts/{show_id}/episodes")
+def podcast_episodes(show_id: str):
+    try:
+        return podcasts.episodes(show_id)
+    except Exception:
+        raise HTTPException(502, "Couldn't load the episode list. Try again in a moment.")
+
+
+@app.post("/api/podcasts/{show_id}/episodes")
+def download_episode(show_id: str, req: EpisodeRequest):
+    return {"queued": podcasts.download(show_id, req.guid)}
+
+
+@app.post("/api/podcasts/check")
+def check_podcasts():
+    return {"new": podcasts.check()}
 
 
 @app.get("/api/push/key")

@@ -262,3 +262,24 @@ main { padding: 4px 16px 0; }
 .player-fresh #pf-keep { background: var(--accent); color: #fff; }
 .toast { display: flex; align-items: center; gap: 14px; }
 .toast-action { color: var(--accent); font-weight: 700; padding: 2px 4px; }
+
+/* Podcasts: shows, search, episodes */
+.podcast-panel h4, .more-episodes h4 { display: flex; align-items: center; justify-content: space-between; margin: 16px 0 6px; font-size: 15px; }
+.show-search { margin: 4px 0 4px; }
+.show-row, .episode { display: flex; align-items: center; gap: 12px; padding: 8px 0; list-style: none; }
+.show-row[data-open-show] { cursor: pointer; }
+.show-meta, .episode .label { flex: 1; min-width: 0; }
+.show-meta strong, .show-meta small, .episode .label strong, .episode .label small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.show-meta small, .episode .label small { color: var(--muted); font-size: 13px; }
+.episode .label strong { font-weight: 500; }
+.show-row .chev { color: var(--muted); font-size: 22px; }
+.tag { font-size: 13px; color: var(--muted); }
+.show-head { display: flex; align-items: center; gap: 14px; margin: 4px 0 10px; }
+.show-head .show-art { width: 76px; height: 76px; }
+.show-head strong { font-size: 18px; white-space: normal; }
+.show-actions { display: flex; justify-content: space-between; margin-bottom: 4px; }
+.show-actions button { color: var(--accent); font-weight: 600; padding: 6px 0; }
+.show-actions .danger { color: var(--bad); }
+.more-episodes { margin: 8px 0 0; padding: 0; }
+.episode .text-btn { color: var(--accent); font-weight: 600; padding: 6px 2px; }
+.episode .text-btn:disabled { color: var(--muted); }

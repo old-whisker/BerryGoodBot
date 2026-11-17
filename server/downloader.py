@@ -9,6 +9,8 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.parse
+import urllib.request
 import uuid
 from pathlib import Path
 
@@ -24,6 +26,8 @@ PAUSE_BETWEEN_DOWNLOADS = (4, 8)
 MAX_ATTEMPTS = 3
 
 SECTIONS = ("music", "podcasts")
+EPISODE_TYPES = {"audio/mpeg": ".mp3", "audio/mp3": ".mp3", "audio/mp4": ".m4a", "audio/x-m4a": ".m4a",
+                 "audio/m4a": ".m4a", "audio/aac": ".aac", "audio/aacp": ".aac", "video/mp4": ".m4a"}
 # Without an explicit section, anything this long that YouTube doesn't label as music is a podcast.
 PODCAST_MIN_SECONDS = 20 * 60
 
@@ -66,7 +70,8 @@ class Downloader:
 
     # ---- public API -------------------------------------------------------
 
-    def submit(self, url: str, title: str | None = None, section: str | None = None, fresh: bool = False) -> dict:
+    def submit(self, url: str, title: str | None = None, section: str | None = None, fresh: bool = False,
+               episode: dict | None = None) -> dict:
         job = {
             "id": uuid.uuid4().hex[:12],
             "url": url,
@@ -83,6 +88,7 @@ class Downloader:
             "attempt": 1,
             "section": section,  # music | podcasts; None means sort it automatically
             "fresh": fresh,  # part of a Fresh mix: lands in the Fresh tab until kept
+            "episode": episode,  # podcast episode details: fetched directly from its feed, not via yt-dlp
         }
         with self._lock:
             self.jobs[job["id"]] = job
@@ -155,7 +161,7 @@ class Downloader:
                 url = job["url"]
             downloaded = False
             try:
-                result = self._run(job_id, url)
+                result = self._run_episode(job_id, url, job["episode"]) if job.get("episode") else self._run(job_id, url)
                 downloaded = result.pop("downloaded", False)
                 self._update(job_id, status="done", progress=1.0, error=None, finished_at=time.time(), **result)
             except Exception as e:  # yt-dlp raises many types; surface them all to the UI
@@ -192,6 +198,40 @@ class Downloader:
         if not added and not already:
             raise DownloadError("Couldn't find any videos in that playlist.")
         return {"title": title, "playlist": {"added": added, "already": already}}
+
+    def _run_episode(self, job_id: str, url: str, ep: dict) -> dict:
+        """A podcast episode is a plain audio file: download it as-is (iPhones play MP3 and AAC natively)."""
+        existing = self.library.find_by_source(ep["source_id"])
+        if existing:
+            return {"track_id": existing["id"], "title": existing["title"], "duplicate": True, "section": "podcasts"}
+        track_id = uuid.uuid4().hex[:12]
+        tmp = Path(tempfile.mkdtemp(prefix="berry-"))
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "BerryGoodTunes/1.0 (personal podcast player)"})
+            with urllib.request.urlopen(req, timeout=60) as r:
+                ext = EPISODE_TYPES.get(r.headers.get_content_type()) or Path(urllib.parse.urlparse(r.geturl()).path).suffix.lower()
+                if ext not in (".mp3", ".m4a", ".aac"):
+                    ext = ".mp3" if ext not in (".mp4", ".m4v") else ".m4a"
+                total = int(r.headers.get("Content-Length") or 0)
+                audio = tmp / f"{track_id}{ext}"
+                done = 0
+                self._update(job_id, status="downloading")
+                with open(audio, "wb") as f:
+                    while chunk := r.read(256 * 1024):
+                        f.write(chunk)
+                        done += len(chunk)
+                        if total:
+                            self._update(job_id, progress=min(done / total, 1.0))
+            cover = None
+            if ep.get("cover") and Path(ep["cover"]).exists():
+                cover = tmp / f"{track_id}{Path(ep['cover']).suffix}"
+                shutil.copy(ep["cover"], cover)  # copy: the show's artwork is shared by its episodes
+            meta = {k: ep.get(k) for k in ("title", "artist", "duration", "source_url", "source_id", "podcast_id", "published_at")}
+            meta["section"] = "podcasts"
+            track = self.library.add(track_id, audio, cover, meta)
+            return {"track_id": track["id"], "title": track["title"], "section": "podcasts"}
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
     def _run(self, job_id: str, url: str) -> dict:
         track_id = uuid.uuid4().hex[:12]
