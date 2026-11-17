@@ -55,12 +55,20 @@ const prefs = {
 };
 
 let toastTimer;
-function toast(msg) {
+function toast(msg, action) {
   const el = $('toast');
   el.textContent = msg;
+  if (action) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'toast-action';
+    btn.textContent = action.label;
+    btn.addEventListener('click', () => { el.hidden = true; action.run(); });
+    el.append(btn);
+  }
   el.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { el.hidden = true; }, 3500);
+  toastTimer = setTimeout(() => { el.hidden = true; }, action ? 5000 : 3500);
 }
 
 /* ---------- playback log (Settings → Playback log) ---------- */
@@ -157,7 +165,8 @@ function visibleTracks() {
   const pl = currentPlaylist();
   const list = pl ? pl.track_ids.map(trackById).filter(Boolean)
     : state.view === 'fresh' && state.section === 'music' ? allTracks({ fresh: true }) : allTracks();
-  return q ? list.filter((t) => `${t.title} ${t.artist}`.toLowerCase().includes(q)) : list;
+  const shown = list.filter((t) => !removing.has(t.id));
+  return q ? shown.filter((t) => `${t.title} ${t.artist}`.toLowerCase().includes(q)) : shown;
 }
 
 const isPlayable = (id) => state.local.has(id) || (state.online && state.server.has(id));
@@ -472,6 +481,59 @@ async function removeLocal(id) {
   }
 }
 
+/* ---------- Fresh mix: keep or drop a song in one tap ---------- */
+
+const removing = new Map(); // id -> timer, songs hidden while their Undo is on offer
+
+async function keepFresh(id) {
+  if (!state.online) { toast('Your PC needs to be on to keep songs.'); return; }
+  try {
+    await api(`/tracks/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ keep: true }) });
+    await refreshTracks();
+    renderNowPlaying();
+    toast('Added to your music.');
+  } catch {
+    toast('Couldn’t reach your PC.');
+  }
+}
+
+function dropFresh(id) {
+  const t = trackById(id);
+  if (!t) return;
+  if (state.current === id) step(1); // move on rather than stop
+  removing.set(id, setTimeout(() => finishDrop(id), 5000));
+  renderTracks();
+  renderViews();
+  toast(`Removed “${t.title}”.`, { label: 'Undo', run: () => {
+    clearTimeout(removing.get(id));
+    removing.delete(id);
+    renderTracks();
+    renderViews();
+  } });
+}
+
+async function finishDrop(id) {
+  removing.delete(id);
+  if (state.current === id) {
+    audio.pause();
+    audio.removeAttribute('src');
+    state.current = null;
+    renderNowPlaying();
+  }
+  if (state.server.has(id)) {
+    try {
+      await api(`/tracks/${id}`, { method: 'DELETE' });
+    } catch {
+      state.pendingDeletes.push(id);
+      prefs.set('pendingDeletes', state.pendingDeletes);
+    }
+    state.server.delete(id);
+  }
+  await removeLocal(id);
+  renderTracks();
+  renderViews();
+}
+
 async function deleteTrack(id) {
   const t = trackById(id);
   if (!t || !confirm(`Delete “${t.title}” from your library?`)) return;
@@ -665,7 +727,9 @@ function renderTracks() {
         <span class="cover"><img alt="" ${cover ? `src="${esc(cover)}"` : ''} onerror="this.removeAttribute('src')"></span>
         <span class="meta${info?.played ? ' played' : ''}"><strong>${esc(t.title)}</strong><small>${esc(sub)}</small>${bar}</span>
       </button>
-      <span class="state ${cls}" title="${label}" aria-label="${label}">${icon}</span>
+      ${t.fresh && state.server.has(t.id) ? `<button class="keep-btn" type="button" data-keep>Keep</button>
+      <button class="icon-btn drop-btn" type="button" data-drop aria-label="Not for me">${ICONS.close}</button>`
+    : `<span class="state ${cls}" title="${label}" aria-label="${label}">${icon}</span>`}
       <button class="icon-btn more" type="button" aria-label="More">${ICONS.more}</button>
     </li>`;
   }).join('');
@@ -676,6 +740,8 @@ $('tracks').addEventListener('click', (e) => {
   if (!li) return;
   const id = li.dataset.id;
   if (e.target.closest('.more')) { openTrackSheet(id); return; }
+  if (e.target.closest('[data-keep]')) { keepFresh(id); return; }
+  if (e.target.closest('[data-drop]')) { dropFresh(id); return; }
   if (!isPlayable(id)) { toast('This song isn’t saved here and your PC is offline.'); return; }
   playFromList(id);
 });
@@ -1004,6 +1070,11 @@ function renderNowPlaying() {
   }
   $('mini-title').textContent = $('player-title').textContent = t.title;
   $('mini-artist').textContent = $('player-artist').textContent = t.artist || '';
+  if (renderNowPlaying.shown !== t.id) { // a new song starts with its title collapsed
+    renderNowPlaying.shown = t.id;
+    $('player-titles').classList.remove('expanded');
+  }
+  $('player-fresh').hidden = !(t.fresh && state.server.has(t.id));
   renderPlayState();
 }
 
@@ -1116,6 +1187,9 @@ $('mini-next').addEventListener('click', () => step(1));
 $('next').addEventListener('click', () => step(1));
 $('prev').addEventListener('click', () => step(-1));
 $('mini-open').addEventListener('click', () => { $('player').hidden = false; });
+$('player-titles').addEventListener('click', () => $('player-titles').classList.toggle('expanded'));
+$('pf-keep').addEventListener('click', () => keepFresh(state.current));
+$('pf-drop').addEventListener('click', () => dropFresh(state.current));
 $('player-close').addEventListener('click', () => { $('player').hidden = true; });
 
 $('shuffle').addEventListener('click', () => {
@@ -1206,17 +1280,7 @@ $('sheet-source').addEventListener('click', () => {
 });
 $('sheet-delete').addEventListener('click', () => { closeSheets(); deleteTrack(sheetTrack); });
 $('sheet-add-pl').addEventListener('click', () => { closeSheets(); openPickSheet(sheetTrack); });
-$('sheet-keep').addEventListener('click', async () => {
-  closeSheets();
-  try {
-    await api(`/tracks/${sheetTrack}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ keep: true }) });
-    await refreshTracks();
-    renderViews();
-    toast('Kept. It’s in All music now.');
-  } catch {
-    toast('Couldn’t reach your PC.');
-  }
-});
+$('sheet-keep').addEventListener('click', () => { closeSheets(); keepFresh(sheetTrack); });
 $('fresh-now').addEventListener('click', () => {
   const n = allTracks({ fresh: true }).length;
   if (n && !confirm(`Fetch a new mix? The ${n} Fresh songs you haven’t kept will be replaced.`)) return;

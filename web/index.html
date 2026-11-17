@@ -71,8 +71,14 @@
       <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
     </button>
     <span class="cover player-cover"><img id="player-cover" alt=""></span>
-    <h2 id="player-title"></h2>
-    <p id="player-artist"></p>
+    <button id="player-titles" class="player-titles" type="button" aria-label="Show full title">
+      <h2 id="player-title"></h2>
+      <p id="player-artist"></p>
+    </button>
+    <div id="player-fresh" class="player-fresh" hidden>
+      <button id="pf-keep" type="button">＋ Keep</button>
+      <button id="pf-drop" type="button">✕ Not for me</button>
+    </div>
     <input id="seek" type="range" min="0" max="1000" value="0" aria-label="Seek">
     <div class="times"><span id="t-cur">0:00</span><span id="t-dur">0:00</span></div>
     <div class="controls">
