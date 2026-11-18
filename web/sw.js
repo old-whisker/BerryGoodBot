@@ -1,5 +1,5 @@
 // App shell cache: opens instantly (and with the PC off), refreshes in the background.
-const CACHE = 'berrytunes-v9';
+const CACHE = 'berrytunes-v11';
 const SHELL = ['./', 'index.html', 'app.js', 'styles.css', 'manifest.webmanifest', 'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', (e) => {

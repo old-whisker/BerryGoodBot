@@ -61,8 +61,14 @@ Now in YouTube (or any app), tap **Share → Add to BerryGoodTunes**. Open Berry
 - **Failed downloads:** when two or more fail, a **Retry all** row appears above them. Each failed song also has its own **Retry**, and retried songs don't create duplicates.
 - **✨ Fresh mix (new music every day):** each evening your PC offers about 20 new songs related to the music you already have. It picks a few of your songs and follows YouTube's auto-generated "Mix" for each, skipping anything you already have or were offered before.
   - **The prompt:** around **5:30 PM** (your PC's time), if the PC is on, your phone gets a notification. If the PC is off then, it comes when you switch it on that evening. No need to leave the PC on overnight. Tap the notification to start, or use the **Start / Not today** banner in the app. **Fetch a new mix now** in the Fresh tab works any time the PC is on.
-  - **Where songs go:** new songs appear only in the **✨ Fresh** tab, not in All music. To keep one, use **⋯ → Keep in my library**, or add it to a playlist. Songs you don't keep are cleared, from the PC and your phones, when the next mix arrives.
+  - **Where songs go:** new songs appear only in the **✨ Fresh** tab, not in All music. Each has **Keep** and **✕** buttons on its row, and in the full player while it plays. **✕** gives you a few seconds to Undo. Adding a song to a playlist also keeps it. Songs you don't keep are cleared, from the PC and your phones, when the next mix arrives.
   - **Notifications, one-time setup per phone:** open the app from the Home Screen, go to **Settings → Notifications on this device → Turn on**, and tap **Allow**. That button then becomes **Send test**. Needs iOS 16.4 or newer. If you tapped Don't Allow, turn it back on in iPhone **Settings → Notifications → BerryGoodTunes**.
+- **🎙 Podcast subscriptions:** in **Podcasts → 🎙 Shows**, search for a show (Apple's free podcast directory), or paste its feed link or Apple Podcasts link, and tap **Follow**.
+  - **Following:** the 3 newest episodes download straight away. While your PC is on, it checks every couple of hours and downloads new episodes automatically, and your phone gets a "New episode" notification.
+  - **Source:** episodes come from the podcast's own feed, not YouTube, so there are no bot checks or 403s.
+  - **Show pages:** tap a show for its page. Downloaded episodes are at the top, and older ones under **More episodes** each have a **Download** button, handy for starting a series from episode 1.
+  - **Ordering and resume:** podcasts are listed by release date. Episodes resume where you left off.
+  - **Unfollow** stops new downloads. Episodes you've downloaded stay.
 - **Music and Podcasts:** the switch at the top keeps spoken-word content (podcasts, lectures, audiobooks) out of your music. Each side has its own list, search, playlists, and Play/Shuffle. Music is the default.
   - **Links pasted in the app** go to whichever side you're on.
   - **Links from the Share-sheet Shortcut are sorted automatically:** anything YouTube labels as Music goes to Music, and anything else 20 minutes or longer goes to Podcasts. The download banner says where each one went.
@@ -79,7 +85,7 @@ Now in YouTube (or any app), tap **Share → Add to BerryGoodTunes**. Open Berry
   - Tap the **selected** tab again to rename or delete the playlist. Deleting a playlist never deletes its songs.
   - Play and Shuffle play the playlist you're viewing.
   - Playlists are stored on your PC, so they sync to every device. Changing them needs the PC online; viewing and playing works offline.
-- **Play:** tap a song. It plays through the list, and shuffle and repeat are in the full player (tap the mini player). Lock-screen controls and artwork work.
+- **Play:** tap a song. In the full player, tap a long title to see all of it. It plays through the list, and shuffle and repeat are in the full player (tap the mini player). Lock-screen controls and artwork work.
 - **Song status icons:** ✅ saved on this device (plays offline) · ☁️ on your PC only (plays only while the PC is reachable) · ⬇️ saving now.
 - **⋯ menu:** save to this device, open the original video, or delete. Delete removes the song from the PC and this phone.
 - **Settings (gear):** auto-save new songs to this device (on by default), storage used, the yt-dlp version, and "save all songs now".

@@ -55,12 +55,20 @@ const prefs = {
 };
 
 let toastTimer;
-function toast(msg) {
+function toast(msg, action) {
   const el = $('toast');
   el.textContent = msg;
+  if (action) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'toast-action';
+    btn.textContent = action.label;
+    btn.addEventListener('click', () => { el.hidden = true; action.run(); });
+    el.append(btn);
+  }
   el.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { el.hidden = true; }, 3500);
+  toastTimer = setTimeout(() => { el.hidden = true; }, action ? 5000 : 3500);
 }
 
 /* ---------- playback log (Settings → Playback log) ---------- */
@@ -122,6 +130,9 @@ const state = {
   view: prefs.get('view', 'all'),        // 'all' or a playlist id
   section: prefs.get('section', 'music'), // music | podcasts
   fresh: null,                            // the PC's Fresh mix status
+  shows: prefs.get('shows', []),          // podcast subscriptions (cached for offline)
+  showResults: null,                      // podcast search results
+  showEpisodes: {},                       // show id -> episode list from its feed
   shuffle: prefs.get('shuffle', false),
   repeat: prefs.get('repeat', 'off'), // off | all | one
   autosave: prefs.get('autosave', true),
@@ -139,15 +150,20 @@ const trackById = (id) => state.server.get(id) || state.local.get(id);
 const SECTION_NAMES = { music: 'Music', podcasts: 'Podcasts' };
 const sectionOf = (item) => item?.section || 'music';
 
-// Songs in the section being viewed (Music or Podcasts), newest first.
 // Songs in the section being viewed (Music or Podcasts), newest first. Songs from a Fresh mix
 // show only in the Fresh tab until you keep them.
 function allTracks({ fresh = false } = {}) {
   const merged = new Map(state.local);
   for (const [id, t] of state.server) merged.set(id, t);
+  // Episodes go by release date, so an old episode downloaded today doesn't jump to the top.
+  const when = (t) => t.published_at || t.added_at;
   return [...merged.values()].filter((t) => sectionOf(t) === state.section && !!t.fresh === fresh)
-    .sort((a, b) => b.added_at - a.added_at);
+    .sort((a, b) => when(b) - when(a));
 }
+
+// Views that aren't playlists: all, ✨ fresh, 🎙 shows, and one show (show:<id>).
+const isBuiltInView = (v) => ['all', 'fresh', 'shows'].includes(v) || v.startsWith('show:');
+const currentShowId = () => (state.section === 'podcasts' && state.view.startsWith('show:') ? state.view.slice(5) : null);
 
 const sectionPlaylists = () => state.playlists.filter((pl) => sectionOf(pl) === state.section);
 const currentPlaylist = () => sectionPlaylists().find((pl) => pl.id === state.view) || null;
@@ -155,9 +171,13 @@ const currentPlaylist = () => sectionPlaylists().find((pl) => pl.id === state.vi
 function visibleTracks() {
   const q = state.filter.trim().toLowerCase();
   const pl = currentPlaylist();
+  const showId = currentShowId();
   const list = pl ? pl.track_ids.map(trackById).filter(Boolean)
-    : state.view === 'fresh' && state.section === 'music' ? allTracks({ fresh: true }) : allTracks();
-  return q ? list.filter((t) => `${t.title} ${t.artist}`.toLowerCase().includes(q)) : list;
+    : state.view === 'fresh' && state.section === 'music' ? allTracks({ fresh: true })
+    : state.view === 'shows' && state.section === 'podcasts' ? []
+    : showId ? allTracks().filter((t) => t.podcast_id === showId) : allTracks();
+  const shown = list.filter((t) => !removing.has(t.id));
+  return q ? shown.filter((t) => `${t.title} ${t.artist}`.toLowerCase().includes(q)) : shown;
 }
 
 const isPlayable = (id) => state.local.has(id) || (state.online && state.server.has(id));
@@ -265,7 +285,7 @@ async function refreshPlaylists() {
 function setPlaylists(list) {
   state.playlists = list;
   prefs.set('playlists', list);
-  if (state.view !== 'all' && state.view !== 'fresh' && !currentPlaylist()) setView('all');
+  if (!isBuiltInView(state.view) && !currentPlaylist()) setView('all');
   renderViews();
   renderTracks();
 }
@@ -472,6 +492,203 @@ async function removeLocal(id) {
   }
 }
 
+/* ---------- podcast subscriptions (🎙 Shows) ---------- */
+
+async function refreshShows() {
+  try {
+    state.shows = await (await api('/podcasts')).json();
+    prefs.set('shows', state.shows);
+    if (currentShowId() && !state.shows.some((s) => s.id === currentShowId())) setView('shows');
+  } catch { /* PC offline: keep the cached list */ }
+  renderViews();
+  renderTracks();
+}
+
+const showImage = (id) => (state.online ? `/api/podcasts/${id}/image` : '');
+const fmtDate = (ts) => (ts ? new Date(ts * 1000).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' }) : '');
+
+function renderPodcastPanel() {
+  const panel = $('podcast-panel');
+  const more = $('more-episodes');
+  const inPodcasts = state.section === 'podcasts';
+  panel.hidden = !inPodcasts || !(state.view === 'shows' || currentShowId());
+  more.hidden = !inPodcasts || !currentShowId();
+  if (panel.hidden) return;
+
+  const art = (id) => `<span class="cover show-art"><img alt="" ${showImage(id) ? `src="${showImage(id)}"` : ''} onerror="this.removeAttribute('src')"></span>`;
+  const showId = currentShowId();
+  if (showId) {
+    const show = state.shows.find((s) => s.id === showId);
+    if (!show) return;
+    panel.innerHTML = `<div class="show-head">${art(show.id)}
+        <div class="show-meta"><strong>${esc(show.title)}</strong><small>${esc(show.author || '')}</small></div></div>
+      <div class="show-actions"><button type="button" data-back-shows>‹ All shows</button>
+        <button type="button" class="danger" data-unsubscribe="${show.id}">Unfollow</button></div>`;
+    const episodes = state.showEpisodes[showId];
+    const notYet = (episodes || []).filter((e) => !e.track_id);
+    more.innerHTML = !state.online ? ''
+      : !episodes ? '<p class="empty-note">Loading episodes…</p>'
+      : !notYet.length ? ''
+      : `<h4>More episodes</h4>` + notYet.map((e) => `<li class="episode">
+          <div class="label"><strong>${esc(e.title)}</strong><small>${[fmtDate(e.published_at), fmtTime(e.duration)].filter(Boolean).join(' · ')}</small></div>
+          <button type="button" class="text-btn" data-episode="${esc(e.guid)}" ${e.queued ? 'disabled' : ''}>${e.queued ? 'Queued' : 'Download'}</button></li>`).join('');
+    return;
+  }
+
+  const results = state.showResults;
+  const subscribed = new Set(state.shows.map((s) => s.feed_url));
+  panel.innerHTML = `<form class="add show-search" data-show-search>
+      <input type="search" name="q" placeholder="Search podcasts, or paste a feed link" autocomplete="off" required>
+      <button type="submit">Find</button></form>`
+    + (results ? `<h4>Results</h4>` + (results.length ? results.map((r, i) => `<li class="show-row">
+        <span class="cover show-art"><img alt="" src="${esc(r.image_url || '')}" onerror="this.removeAttribute('src')"></span>
+        <div class="show-meta"><strong>${esc(r.title)}</strong><small>${esc(r.author || '')}</small></div>
+        ${subscribed.has(r.feed_url) ? '<span class="tag">Following</span>'
+          : `<button type="button" class="keep-btn" data-subscribe="${i}">Follow</button>`}</li>`).join('')
+        : '<p class="empty-note">No shows found.</p>') : '')
+    + `<h4>Your shows ${state.shows.length ? `<button type="button" class="text-btn" data-check-shows>Check for new episodes</button>` : ''}</h4>`
+    + (state.shows.length ? state.shows.map((s) => `<li class="show-row" data-open-show="${s.id}">${art(s.id)}
+        <div class="show-meta"><strong>${esc(s.title)}</strong><small>${esc(s.author || '')}</small></div>
+        <span class="chev">›</span></li>`).join('')
+      : '<p class="empty-note">Follow a show and its newest episodes download automatically, plus new ones as they come out (while your PC is on).</p>');
+}
+
+async function loadEpisodes(showId) {
+  try {
+    state.showEpisodes[showId] = await (await api(`/podcasts/${showId}/episodes`, {}, 30000)).json();
+  } catch (e) {
+    toast(e instanceof ApiError ? e.message : 'Couldn’t reach your PC.');
+  }
+  renderPodcastPanel();
+}
+
+async function podcastPost(path, body, timeout = 30000) {
+  if (!state.online) { toast('Your PC needs to be on for this.'); return null; }
+  try {
+    return await (await api(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) }, timeout)).json();
+  } catch (e) {
+    toast(e instanceof ApiError ? e.message : 'Couldn’t reach your PC.');
+    return null;
+  }
+}
+
+async function followShow(link) {
+  toast('Following… fetching the latest episodes.');
+  const show = await podcastPost('/podcasts', { link }, 60000);
+  if (!show) return;
+  await refreshShows();
+  pollJobs();
+  toast(`Following ${show.title}. Its latest episodes are downloading.`);
+}
+
+$('podcast-panel').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const q = e.target.q.value.trim();
+  if (!q) return;
+  if (/^https?:\/\//.test(q)) { e.target.q.value = ''; followShow(q); return; }
+  if (!state.online) { toast('Your PC needs to be on to search.'); return; }
+  try {
+    state.showResults = await (await api(`/podcasts/search?q=${encodeURIComponent(q)}`, {}, 20000)).json();
+  } catch (err) {
+    toast(err instanceof ApiError ? err.message : 'Couldn’t reach your PC.');
+  }
+  renderPodcastPanel();
+});
+
+$('podcast-panel').addEventListener('click', async (e) => {
+  const t = e.target;
+  if (t.closest('[data-subscribe]')) { followShow(state.showResults[t.closest('[data-subscribe]').dataset.subscribe].feed_url); return; }
+  if (t.closest('[data-back-shows]')) { setView('shows'); renderViews(); renderTracks(); return; }
+  if (t.closest('[data-check-shows]')) {
+    toast('Checking your shows…');
+    const res = await podcastPost('/podcasts/check', {}, 120000);
+    if (res) { toast(res.new ? `${res.new} new episode${res.new === 1 ? '' : 's'} downloading.` : 'No new episodes.'); pollJobs(); }
+    return;
+  }
+  const unsub = t.closest('[data-unsubscribe]');
+  if (unsub) {
+    const show = state.shows.find((s) => s.id === unsub.dataset.unsubscribe);
+    if (!confirm(`Unfollow ${show.title}? Episodes you’ve downloaded stay in Podcasts.`)) return;
+    try { await api(`/podcasts/${show.id}`, { method: 'DELETE' }); } catch { toast('Couldn’t reach your PC.'); return; }
+    setView('shows');
+    await refreshShows();
+    return;
+  }
+  const open = t.closest('[data-open-show]');
+  if (open) {
+    setView(`show:${open.dataset.openShow}`);
+    renderViews();
+    renderTracks();
+    window.scrollTo({ top: 0 });
+    if (state.online) loadEpisodes(open.dataset.openShow);
+  }
+});
+
+$('more-episodes').addEventListener('click', async (e) => {
+  const btn = e.target.closest('[data-episode]');
+  if (!btn) return;
+  const showId = currentShowId();
+  const ep = state.showEpisodes[showId]?.find((x) => x.guid === btn.dataset.episode);
+  if (await podcastPost(`/podcasts/${showId}/episodes`, { guid: btn.dataset.episode })) {
+    if (ep) ep.queued = true;
+    renderPodcastPanel();
+    pollJobs();
+  }
+});
+
+/* ---------- Fresh mix: keep or drop a song in one tap ---------- */
+
+const removing = new Map(); // id -> timer, songs hidden while their Undo is on offer
+
+async function keepFresh(id) {
+  if (!state.online) { toast('Your PC needs to be on to keep songs.'); return; }
+  try {
+    await api(`/tracks/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ keep: true }) });
+    await refreshTracks();
+    renderNowPlaying();
+    toast('Added to your music.');
+  } catch {
+    toast('Couldn’t reach your PC.');
+  }
+}
+
+function dropFresh(id) {
+  const t = trackById(id);
+  if (!t) return;
+  if (state.current === id) step(1); // move on rather than stop
+  removing.set(id, setTimeout(() => finishDrop(id), 5000));
+  renderTracks();
+  renderViews();
+  toast(`Removed “${t.title}”.`, { label: 'Undo', run: () => {
+    clearTimeout(removing.get(id));
+    removing.delete(id);
+    renderTracks();
+    renderViews();
+  } });
+}
+
+async function finishDrop(id) {
+  removing.delete(id);
+  if (state.current === id) {
+    audio.pause();
+    audio.removeAttribute('src');
+    state.current = null;
+    renderNowPlaying();
+  }
+  if (state.server.has(id)) {
+    try {
+      await api(`/tracks/${id}`, { method: 'DELETE' });
+    } catch {
+      state.pendingDeletes.push(id);
+      prefs.set('pendingDeletes', state.pendingDeletes);
+    }
+    state.server.delete(id);
+  }
+  await removeLocal(id);
+  renderTracks();
+  renderViews();
+}
+
 async function deleteTrack(id) {
   const t = trackById(id);
   if (!t || !confirm(`Delete “${t.title}” from your library?`)) return;
@@ -509,16 +726,20 @@ function renderSection() {
   $('search').placeholder = music ? 'Search your music' : 'Search your podcasts';
 }
 
-$('sections').addEventListener('click', (e) => {
-  const btn = e.target.closest('[data-section]');
-  if (!btn || btn.dataset.section === state.section) return;
-  state.section = btn.dataset.section;
+function switchSection(section) {
+  if (section === state.section) return;
+  state.section = section;
   prefs.set('section', state.section);
   setView('all');
   renderSection();
   renderViews();
   renderTracks();
   window.scrollTo({ top: 0 });
+}
+
+$('sections').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-section]');
+  if (btn) switchSection(btn.dataset.section);
 });
 
 /* ---------- playlists ---------- */
@@ -531,10 +752,12 @@ function setView(view) {
 function renderViews() {
   const count = (pl) => pl.track_ids.filter((id) => trackById(id)).length;
   const chip = (view, label, extra = '') =>
-    `<button type="button" class="chip${state.view === view ? ' on' : ''}" data-view="${view}">${label}${extra}</button>`;
+    `<button type="button" class="chip${state.view === view ? ' on' : ''}" data-view="${view.startsWith('show:') ? 'shows' : view}">${label}${extra}</button>`;
   const freshCount = state.section === 'music' ? allTracks({ fresh: true }).length : 0;
   $('views').innerHTML = chip('all', `All ${SECTION_NAMES[state.section].toLowerCase()}`)
     + (state.section === 'music' ? chip('fresh', '✨ Fresh', freshCount ? ` <small>${freshCount}</small>` : '') : '')
+    + (state.section === 'podcasts' ? chip(state.view.startsWith('show:') ? state.view : 'shows', '🎙 Shows',
+      state.shows.length ? ` <small>${state.shows.length}</small>` : '') : '')
     + sectionPlaylists().map((pl) => chip(pl.id, esc(pl.name), state.view === pl.id
       ? ` <span class="chip-more" aria-label="Playlist options">${ICONS.more}</span>` : ` <small>${count(pl)}</small>`)).join('')
     + `<button type="button" class="chip new" data-new-playlist>+ New</button>`;
@@ -571,7 +794,7 @@ $('views').addEventListener('click', async (e) => {
   }
   const btn = e.target.closest('[data-view]');
   if (!btn) return;
-  if (btn.dataset.view === state.view && !['all', 'fresh'].includes(state.view)) { openPlaylistSheet(); return; }
+  if (btn.dataset.view === state.view && !isBuiltInView(state.view)) { openPlaylistSheet(); return; }
   setView(btn.dataset.view);
   renderViews();
   renderTracks();
@@ -644,14 +867,16 @@ $('pick-new').addEventListener('click', async () => {
 function renderTracks() {
   const list = visibleTracks();
   const pl = currentPlaylist();
-  $('empty').hidden = pl ? list.length > 0 : allTracks().length > 0;
+  renderPodcastPanel();
+  const inShows = state.section === 'podcasts' && (state.view === 'shows' || !!currentShowId());
+  $('empty').hidden = inShows || (pl ? list.length > 0 : allTracks().length > 0);
   $('fresh-actions').hidden = !(state.view === 'fresh' && state.section === 'music');
   $('empty').textContent = state.view === 'fresh' && state.section === 'music'
     ? 'No Fresh mix right now. Each evening your PC offers about 20 new songs related to your music. Or fetch some now.'
     : pl ? `This playlist is empty. Use ${state.section === 'music' ? 'a song’s' : 'an episode’s'} ⋯ menu to add it here.`
     : state.section === 'music' ? 'No music yet. Paste a link above to add some.'
     : 'No podcasts yet. Paste a link above while on this tab, or move something here from Music with its ⋯ menu.';
-  $('list-actions').hidden = list.length === 0;
+  $('list-actions').hidden = list.length === 0 || state.view === 'shows';
   $('tracks').innerHTML = list.map((t) => {
     const cover = coverUrl(t);
     const [cls, icon, label] = state.local.has(t.id) ? ['local', ICONS.local, 'Saved on this device']
@@ -665,7 +890,9 @@ function renderTracks() {
         <span class="cover"><img alt="" ${cover ? `src="${esc(cover)}"` : ''} onerror="this.removeAttribute('src')"></span>
         <span class="meta${info?.played ? ' played' : ''}"><strong>${esc(t.title)}</strong><small>${esc(sub)}</small>${bar}</span>
       </button>
-      <span class="state ${cls}" title="${label}" aria-label="${label}">${icon}</span>
+      ${t.fresh && state.server.has(t.id) ? `<button class="keep-btn" type="button" data-keep>Keep</button>
+      <button class="icon-btn drop-btn" type="button" data-drop aria-label="Not for me">${ICONS.close}</button>`
+    : `<span class="state ${cls}" title="${label}" aria-label="${label}">${icon}</span>`}
       <button class="icon-btn more" type="button" aria-label="More">${ICONS.more}</button>
     </li>`;
   }).join('');
@@ -676,6 +903,8 @@ $('tracks').addEventListener('click', (e) => {
   if (!li) return;
   const id = li.dataset.id;
   if (e.target.closest('.more')) { openTrackSheet(id); return; }
+  if (e.target.closest('[data-keep]')) { keepFresh(id); return; }
+  if (e.target.closest('[data-drop]')) { dropFresh(id); return; }
   if (!isPlayable(id)) { toast('This song isn’t saved here and your PC is offline.'); return; }
   playFromList(id);
 });
@@ -1004,6 +1233,11 @@ function renderNowPlaying() {
   }
   $('mini-title').textContent = $('player-title').textContent = t.title;
   $('mini-artist').textContent = $('player-artist').textContent = t.artist || '';
+  if (renderNowPlaying.shown !== t.id) { // a new song starts with its title collapsed
+    renderNowPlaying.shown = t.id;
+    $('player-titles').classList.remove('expanded');
+  }
+  $('player-fresh').hidden = !(t.fresh && state.server.has(t.id));
   renderPlayState();
 }
 
@@ -1116,6 +1350,9 @@ $('mini-next').addEventListener('click', () => step(1));
 $('next').addEventListener('click', () => step(1));
 $('prev').addEventListener('click', () => step(-1));
 $('mini-open').addEventListener('click', () => { $('player').hidden = false; });
+$('player-titles').addEventListener('click', () => $('player-titles').classList.toggle('expanded'));
+$('pf-keep').addEventListener('click', () => keepFresh(state.current));
+$('pf-drop').addEventListener('click', () => dropFresh(state.current));
 $('player-close').addEventListener('click', () => { $('player').hidden = true; });
 
 $('shuffle').addEventListener('click', () => {
@@ -1206,17 +1443,7 @@ $('sheet-source').addEventListener('click', () => {
 });
 $('sheet-delete').addEventListener('click', () => { closeSheets(); deleteTrack(sheetTrack); });
 $('sheet-add-pl').addEventListener('click', () => { closeSheets(); openPickSheet(sheetTrack); });
-$('sheet-keep').addEventListener('click', async () => {
-  closeSheets();
-  try {
-    await api(`/tracks/${sheetTrack}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ keep: true }) });
-    await refreshTracks();
-    renderViews();
-    toast('Kept. It’s in All music now.');
-  } catch {
-    toast('Couldn’t reach your PC.');
-  }
-});
+$('sheet-keep').addEventListener('click', () => { closeSheets(); keepFresh(sheetTrack); });
 $('fresh-now').addEventListener('click', () => {
   const n = allTracks({ fresh: true }).length;
   if (n && !confirm(`Fetch a new mix? The ${n} Fresh songs you haven’t kept will be replaced.`)) return;
@@ -1360,6 +1587,7 @@ $('push-toggle').addEventListener('click', async () => {
 // Links that open the app with an action, from a notification tap: /?fresh=start
 function handleLaunchParams(params) {
   if (params.get('fresh') === 'start') startFresh();
+  if (params.get('section') === 'podcasts') switchSection('podcasts');
 }
 navigator.serviceWorker?.addEventListener('message', (e) => {
   if (e.data?.type === 'open-url') handleLaunchParams(new URL(e.data.url).searchParams);
@@ -1378,6 +1606,7 @@ async function sync() {
     await refreshPlaylists();
     await pushProgress();
     await refreshFresh();
+    await refreshShows();
     // Re-send this device's notification subscription in case the PC's copy was lost.
     if (!sync.pushSent) { const sub = await currentPushSubscription().catch(() => null); if (sub) await sendSubscription(sub); sync.pushSent = true; }
     await pollJobs();
@@ -1428,7 +1657,7 @@ async function boot() {
     history.replaceState(null, '', location.pathname);
     await sync();
     await addUrl(shared);
-  } else if (params.has('fresh')) { // opened by tapping the evening notification
+  } else if (params.has('fresh') || params.has('section')) { // opened by tapping a notification
     history.replaceState(null, '', location.pathname);
     await sync();
     handleLaunchParams(params);
