@@ -1,9 +1,11 @@
 // App shell cache: opens instantly (and with the PC off), refreshes in the background.
-const CACHE = 'berrytunes-v11';
+const CACHE = 'berrytunes-v12';
 const SHELL = ['./', 'index.html', 'app.js', 'styles.css', 'manifest.webmanifest', 'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  // cache: 'reload' skips the browser's HTTP cache, which could otherwise hand a new worker the old files.
+  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL.map((u) => new Request(u, { cache: 'reload' }))))
+    .then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', (e) => {
@@ -20,7 +22,8 @@ self.addEventListener('fetch', (e) => {
   // Ignore query strings (e.g. /?add=...) when matching the shell.
   e.respondWith(caches.open(CACHE).then(async (cache) => {
     const cached = await cache.match(e.request, { ignoreSearch: true });
-    const fresh = fetch(e.request).then((res) => {
+    // no-cache: always check with the PC (a cheap 304 when nothing changed), so updates land on the next open.
+    const fresh = fetch(e.request.url, { cache: 'no-cache', credentials: 'same-origin' }).then((res) => {
       if (res.ok) cache.put(e.request, res.clone());
       return res;
     });

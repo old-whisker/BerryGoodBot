@@ -1,5 +1,9 @@
 'use strict';
 
+// Bump on every change to the web files. The PC reports the version it has on disk, and the app
+// offers a reload when this phone is running an older one.
+const APP_VERSION = '2026-11-19';
+
 /* ---------- helpers ---------- */
 
 const $ = (id) => document.getElementById(id);
@@ -139,6 +143,7 @@ const state = {
   // Links added while the PC was off: { url, section }. (Older versions stored bare URLs.)
   pendingAdds: prefs.get('pendingAdds', []).map((p) => (typeof p === 'string' ? { url: p, section: null } : p)),
   pendingDeletes: prefs.get('pendingDeletes', []),
+  pendingKeeps: prefs.get('pendingKeeps', []), // Fresh songs kept while the PC was off
   dismissed: new Set(prefs.get('dismissedJobs', [])),
 };
 
@@ -226,6 +231,7 @@ async function checkHealth() {
     const info = await (await api('/health', {}, 4000)).json();
     state.ytdlp = info.yt_dlp;
     state.jsRuntime = info.js_runtime;
+    state.webVersion = info.web_version;
     setOnline(true);
     return true;
   } catch {
@@ -235,6 +241,7 @@ async function checkHealth() {
 
 async function refreshTracks() {
   const tracks = await (await api('/tracks')).json();
+  for (const t of tracks) if (state.pendingKeeps.includes(t.id)) t.fresh = false; // PC not told yet
   state.server = new Map(tracks.map((t) => [t.id, t]));
   for (const t of tracks) {
     const saved = state.local.get(t.id);
@@ -309,6 +316,15 @@ async function addUrl(raw, section = state.section) {
 }
 
 async function flushPending() {
+  while (state.pendingKeeps.length) {
+    try {
+      await api(`/tracks/${state.pendingKeeps[0]}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ keep: true }) });
+    } catch (e) {
+      if (!(e instanceof ApiError)) throw e; // offline again: try next time. (ApiError: it's gone from the PC.)
+    }
+    state.pendingKeeps.shift();
+    prefs.set('pendingKeeps', state.pendingKeeps);
+  }
   while (state.pendingDeletes.length) {
     await api(`/tracks/${state.pendingDeletes[0]}`, { method: 'DELETE' });
     state.pendingDeletes.shift();
@@ -356,6 +372,11 @@ function renderJobs() {
       <small>About ${state.fresh.size} new songs related to your music</small></div>
       <button type="button" class="text-btn" data-fresh-start>Start</button>
       <button type="button" class="text-btn muted" data-fresh-skip>Not today</button></li>`);
+  }
+  if (state.online && state.webVersion && state.webVersion !== APP_VERSION) {
+    items.unshift(`<li class="job offer"><div class="label"><strong>A new version of the app is ready</strong>
+      <small>Reload to get it. Playback stops for a moment.</small></div>
+      <button type="button" class="text-btn" data-reload>Reload</button></li>`);
   }
   const dismiss = (j) => `<button type="button" data-dismiss="${j.id}" aria-label="Dismiss">${ICONS.close}</button>`;
   const row = (j, label, extra = '') => `<li class="job${j.status === 'error' ? ' error' : ''}">
@@ -640,16 +661,44 @@ $('more-episodes').addEventListener('click', async (e) => {
 
 const removing = new Map(); // id -> timer, songs hidden while their Undo is on offer
 
+// Works with the PC off too: the song moves to Music on this phone at once, and the PC is told
+// on the next sync.
 async function keepFresh(id) {
-  if (!state.online) { toast('Your PC needs to be on to keep songs.'); return; }
+  const t = trackById(id);
+  if (!t) return;
+  markKept(id);
+  renderTracks();
+  renderViews();
+  renderNowPlaying();
   try {
     await api(`/tracks/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ keep: true }) });
-    await refreshTracks();
-    renderNowPlaying();
-    toast('Added to your music.');
-  } catch {
-    toast('Couldn’t reach your PC.');
+    toast(`Added “${t.title}” to your music.`);
+  } catch (e) {
+    if (e instanceof ApiError) return; // already gone from the PC; this phone's copy stays
+    if (!state.pendingKeeps.includes(id)) state.pendingKeeps.push(id);
+    prefs.set('pendingKeeps', state.pendingKeeps);
+    toast(`Added “${t.title}” to your music. Your PC will catch up when it’s on.`);
   }
+}
+
+function markKept(id) {
+  for (const map of [state.server, state.local]) {
+    const t = map.get(id);
+    if (t?.fresh) map.set(id, { ...t, fresh: false });
+  }
+  if (state.local.has(id)) db.put('tracks', state.local.get(id)).catch(() => {});
+}
+
+// Deletes on the PC, or queues it if the PC can't be reached. Called even when this phone hasn't
+// heard from the PC yet (opened with the PC asleep), or the song would come back on the next sync.
+async function deleteOnPc(id) {
+  try {
+    await api(`/tracks/${id}`, { method: 'DELETE' });
+  } catch {
+    if (!state.pendingDeletes.includes(id)) state.pendingDeletes.push(id);
+    prefs.set('pendingDeletes', state.pendingDeletes);
+  }
+  state.server.delete(id);
 }
 
 function dropFresh(id) {
@@ -675,15 +724,7 @@ async function finishDrop(id) {
     state.current = null;
     renderNowPlaying();
   }
-  if (state.server.has(id)) {
-    try {
-      await api(`/tracks/${id}`, { method: 'DELETE' });
-    } catch {
-      state.pendingDeletes.push(id);
-      prefs.set('pendingDeletes', state.pendingDeletes);
-    }
-    state.server.delete(id);
-  }
+  await deleteOnPc(id);
   await removeLocal(id);
   renderTracks();
   renderViews();
@@ -698,15 +739,7 @@ async function deleteTrack(id) {
     state.current = null;
     renderNowPlaying();
   }
-  if (state.server.has(id)) {
-    try {
-      await api(`/tracks/${id}`, { method: 'DELETE' });
-    } catch {
-      state.pendingDeletes.push(id);
-      prefs.set('pendingDeletes', state.pendingDeletes);
-    }
-    state.server.delete(id);
-  }
+  await deleteOnPc(id);
   await removeLocal(id);
   renderTracks();
 }
@@ -850,6 +883,7 @@ $('pick-list').addEventListener('click', async (e) => {
     ? await playlistCall(`/playlists/${pl.id}/tracks/${sheetTrack}`, 'DELETE')
     : await playlistCall(`/playlists/${pl.id}/tracks`, 'POST', { track_id: sheetTrack });
   if (!updated) return;
+  if (!on) markKept(sheetTrack); // the PC keeps a Fresh song once it's in a playlist
   setPlaylists(state.playlists.map((p) => (p.id === updated.id ? updated : p)));
   renderPickList();
 });
@@ -858,7 +892,10 @@ $('pick-new').addEventListener('click', async () => {
   const pl = await newPlaylist();
   if (!pl) return;
   const updated = await playlistCall(`/playlists/${pl.id}/tracks`, 'POST', { track_id: sheetTrack });
-  if (updated) setPlaylists(state.playlists.map((p) => (p.id === updated.id ? updated : p)));
+  if (updated) {
+    markKept(sheetTrack);
+    setPlaylists(state.playlists.map((p) => (p.id === updated.id ? updated : p)));
+  }
   renderPickList();
 });
 
@@ -890,7 +927,7 @@ function renderTracks() {
         <span class="cover"><img alt="" ${cover ? `src="${esc(cover)}"` : ''} onerror="this.removeAttribute('src')"></span>
         <span class="meta${info?.played ? ' played' : ''}"><strong>${esc(t.title)}</strong><small>${esc(sub)}</small>${bar}</span>
       </button>
-      ${t.fresh && state.server.has(t.id) ? `<button class="keep-btn" type="button" data-keep>Keep</button>
+      ${t.fresh ? `<button class="keep-btn" type="button" data-keep>Keep</button>
       <button class="icon-btn drop-btn" type="button" data-drop aria-label="Not for me">${ICONS.close}</button>`
     : `<span class="state ${cls}" title="${label}" aria-label="${label}">${icon}</span>`}
       <button class="icon-btn more" type="button" aria-label="More">${ICONS.more}</button>
@@ -913,6 +950,7 @@ $('jobs').addEventListener('click', (e) => {
   if (e.target.closest('[data-cancel-queued]')) { cancelQueued(); return; }
   if (e.target.closest('[data-fresh-start]')) { startFresh(); return; }
   if (e.target.closest('[data-fresh-skip]')) { skipFresh(); return; }
+  if (e.target.closest('[data-reload]')) { reloadApp(); return; }
   const retry = e.target.closest('[data-retry]');
   if (retry) { retryJobs([retry.dataset.retry]); return; }
   const failedIds = () => state.jobs.filter((j) => j.status === 'error' && !state.dismissed.has(j.id)).map((j) => j.id);
@@ -1237,7 +1275,7 @@ function renderNowPlaying() {
     renderNowPlaying.shown = t.id;
     $('player-titles').classList.remove('expanded');
   }
-  $('player-fresh').hidden = !(t.fresh && state.server.has(t.id));
+  $('player-fresh').hidden = !t.fresh;
   renderPlayState();
 }
 
@@ -1423,12 +1461,12 @@ function openTrackSheet(id) {
   $('sheet-sub').textContent = [t.artist, where, t.size && fmtBytes(t.size)].filter(Boolean).join(' · ');
   $('sheet-save').hidden = state.local.has(id) || !state.online || !state.server.has(id);
   $('sheet-source').hidden = !t.source_url;
-  $('sheet-add-pl').hidden = !state.server.has(id);
+  $('sheet-add-pl').hidden = state.online && !state.server.has(id); // offline: shown, and says to connect
   const pl = currentPlaylist();
   $('sheet-remove-pl').hidden = !pl;
   if (pl) $('sheet-remove-pl').textContent = `Remove from “${pl.name}”`;
   $('sheet-move').hidden = !state.server.has(id) || !!t.fresh;
-  $('sheet-keep').hidden = !t.fresh || !state.server.has(id);
+  $('sheet-keep').hidden = !t.fresh;
   $('sheet-played').hidden = !isResumable(t);
   $('sheet-played').textContent = progress[id]?.played || progress[id]?.pos > 10 ? 'Mark as unplayed' : 'Mark as played';
   $('sheet-move').textContent = `Move to ${SECTION_NAMES[otherSection(sectionOf(t))]}`;
@@ -1484,6 +1522,7 @@ $('sheet-remove-pl').addEventListener('click', async () => {
 async function openSettings() {
   $('autosave').checked = state.autosave;
   $('ytdlp').textContent = state.ytdlp || '–';
+  $('appver').textContent = APP_VERSION + (state.webVersion && state.webVersion !== APP_VERSION ? ` (PC has ${state.webVersion})` : '');
   renderPushRow();
   $('jsruntime').textContent = !state.online ? '–' : state.jsRuntime ? `${state.jsRuntime} ✓` : 'Missing!';
   $('jsruntime-row').classList.toggle('warn', state.online && !state.jsRuntime);
@@ -1592,6 +1631,13 @@ function handleLaunchParams(params) {
 navigator.serviceWorker?.addEventListener('message', (e) => {
   if (e.data?.type === 'open-url') handleLaunchParams(new URL(e.data.url).searchParams);
 });
+
+// Drop the cached app files so the reload fetches the PC's current ones.
+async function reloadApp() {
+  recordProgress(state.current, audio, true);
+  try { await Promise.all((await caches.keys()).map((k) => caches.delete(k))); } catch { /* no cache API */ }
+  location.reload();
+}
 
 /* ---------- sync loop ---------- */
 
