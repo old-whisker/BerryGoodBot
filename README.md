@@ -27,6 +27,7 @@ iPhone (home-screen app)  ──Tailscale──▶  Windows PC
 3. **Double-click `install-autostart.cmd`.** The server now starts hidden whenever you log in, and starts right away too.
    - To remove auto-start, run `install-autostart.cmd -Remove` from a terminal.
    - **After updating the files**, double-click `restart.cmd` to load the new version. No need to reboot.
+     The app on your phone then shows **A new version of the app is ready → Reload**. **Settings → App version** shows which version the phone is running.
    - `start.cmd` runs the server in a visible window instead, which is handy for watching errors. Don't use it while auto-start is running; both use the same port.
 
    Use the `.cmd` files rather than the `.ps1` ones. Windows blocks `.ps1` scripts by default ("running scripts is disabled on this system"), and the `.cmd` files get around that for these scripts only.

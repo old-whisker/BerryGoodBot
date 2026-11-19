@@ -37,6 +37,16 @@ IMAGE_TYPES = {".jpg": "image/jpeg", ".png": "image/png"}
 app = FastAPI(title="BerryGoodTunes")
 
 
+@app.middleware("http")
+async def no_stale_web_files(request, call_next):
+    """Make browsers re-check the app's files every time (a cheap 304 when unchanged). Without this,
+    iOS may keep using an old app.js for hours after the files on the PC are updated."""
+    response = await call_next(request)
+    if not request.url.path.startswith("/api/"):
+        response.headers.setdefault("Cache-Control", "no-cache")
+    return response
+
+
 class JobRequest(BaseModel):
     url: str
     section: str | None = None  # music | podcasts; omitted = sort automatically
@@ -101,7 +111,17 @@ def public(track: dict) -> dict:
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "yt_dlp": yt_dlp.version.__version__, "cookies": COOKIES.exists(), "js_runtime": js_runtime()}
+    return {"ok": True, "yt_dlp": yt_dlp.version.__version__, "cookies": COOKIES.exists(), "js_runtime": js_runtime(),
+            "web_version": web_version()}
+
+
+def web_version() -> str | None:
+    """APP_VERSION from the app.js on disk, so the phone can tell when it's running an older copy."""
+    try:
+        match = re.search(r"const APP_VERSION = '([^']+)'", (WEB_DIR / "app.js").read_text(encoding="utf-8"))
+    except OSError:
+        return None
+    return match.group(1) if match else None
 
 
 @app.get("/api/tracks")
